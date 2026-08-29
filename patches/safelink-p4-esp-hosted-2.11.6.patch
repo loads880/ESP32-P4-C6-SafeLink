@@ -1,0 +1,1103 @@
+diff --git a/host/api/src/esp_hosted_api.c b/host/api/src/esp_hosted_api.c
+index 9ee0c99..74b3cc3 100644
+--- a/host/api/src/esp_hosted_api.c
++++ b/host/api/src/esp_hosted_api.c
+@@ -26,6 +26,8 @@ extern "C" {
+ #endif
+ 
+ /** Macros **/
++const char safelink_stageb337_api_build_marker[] __attribute__((used)) = "SafeLink-StageB-337-v7-eco2:esp_hosted_api";
++
+ static const char *TAG="H_API";
+ 
+ static uint8_t esp_hosted_init_done;
+@@ -100,12 +102,22 @@ static esp_err_t add_esp_wifi_remote_channels(void)
+ 	config.secure = false;
+ 	config.if_type = ESP_STA_IF;
+ 	sta_ch = esp_hosted_add_channel(&config, &tx_cb, esp_wifi_remote_channel_rx);
++	if (!sta_ch) {
++		ESP_LOGE(TAG, "SafeLink: failed to create STA transport channel");
++		return ESP_ERR_NO_MEM;
++	}
+ 	esp_wifi_remote_channel_set(WIFI_IF_STA, sta_ch, tx_cb);
+ 
+ 
+ 	config.secure = false;
+ 	config.if_type = ESP_AP_IF;
+ 	ap_ch = esp_hosted_add_channel(&config, &tx_cb, esp_wifi_remote_channel_rx);
++	if (!ap_ch) {
++		ESP_LOGE(TAG, "SafeLink: failed to create AP transport channel");
++		esp_hosted_remove_channel(sta_ch);
++		sta_ch = NULL;
++		return ESP_ERR_NO_MEM;
++	}
+ 	esp_wifi_remote_channel_set(WIFI_IF_AP, ap_ch, tx_cb);
+ 
+ 	return ESP_OK;
+@@ -132,6 +144,8 @@ static void set_host_modules_log_level(void)
+ }
+ int esp_hosted_init(void)
+ {
++	esp_err_t ret;
++
+ 	if (esp_hosted_init_done)
+ 		return ESP_OK;
+ 
+@@ -143,11 +157,32 @@ int esp_hosted_init(void)
+ 	if (esp_hosted_is_config_valid()) {
+ 		ESP_LOGW(TAG, "ESP-Hosted config valid; reuse existing config");
+ 	} else {
+-		ESP_ERROR_CHECK(esp_hosted_set_default_config());
++		ret = esp_hosted_set_default_config();
++		if (ret != ESP_OK) {
++			ESP_LOGE(TAG, "SafeLink: default transport config failed: %s", esp_err_to_name(ret));
++			return ret;
++		}
++	}
++
++	ret = add_esp_wifi_remote_channels();
++	if (ret != ESP_OK) {
++		return ret;
++	}
++
++	ret = setup_transport(transport_active_cb);
++	if (ret != ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: transport setup failed without abort: %s", esp_err_to_name(ret));
++		remove_esp_wifi_remote_channels();
++		return ret;
++	}
++
++	ret = rpc_init();
++	if (ret != ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: RPC init failed without abort: %s", esp_err_to_name(ret));
++		teardown_transport();
++		remove_esp_wifi_remote_channels();
++		return ret;
+ 	}
+-	ESP_ERROR_CHECK(add_esp_wifi_remote_channels());
+-	ESP_ERROR_CHECK(setup_transport(transport_active_cb));
+-	ESP_ERROR_CHECK(rpc_init());
+ 	rpc_register_event_callbacks();
+ 
+ 	esp_hosted_init_done = 1;
+@@ -156,17 +191,36 @@ int esp_hosted_init(void)
+ 
+ int esp_hosted_deinit(void)
+ {
++	esp_err_t first_error = ESP_OK;
++	esp_err_t ret;
++
+ 	ESP_LOGI(TAG, "ESP-Hosted deinit\n");
+ 	rpc_unregister_event_callbacks();
+-	ESP_ERROR_CHECK(rpc_deinit());
+-	ESP_ERROR_CHECK(remove_esp_wifi_remote_channels());
+-	ESP_ERROR_CHECK(teardown_transport());
++
++	ret = rpc_deinit();
++	if (ret != ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: RPC deinit failed: %s", esp_err_to_name(ret));
++		first_error = ret;
++	}
++
++	ret = remove_esp_wifi_remote_channels();
++	if (ret != ESP_OK && first_error == ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: channel cleanup failed: %s", esp_err_to_name(ret));
++		first_error = ret;
++	}
++
++	ret = teardown_transport();
++	if (ret != ESP_OK && first_error == ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: transport teardown failed: %s", esp_err_to_name(ret));
++		first_error = ret;
++	}
++
+ 	esp_hosted_init_done = 0;
+ 	esp_hosted_transport_up = 0;
+ 	g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
+ 			ESP_HOSTED_EVENT_TRANSPORT_DOWN,
+ 			NULL, 0, HOSTED_BLOCK_MAX);
+-	return ESP_OK;
++	return first_error;
+ }
+ 
+ static inline esp_err_t esp_hosted_reconfigure(void)
+@@ -192,8 +246,16 @@ esp_remote_channel_t esp_hosted_add_channel(esp_remote_channel_config_t config,
+ 	transport_channel_t *t_chan = NULL;
+ 	esp_remote_channel_t eh_chan = NULL;
+ 
++	if (!config || !tx || !rx) {
++		ESP_LOGE(TAG, "SafeLink: invalid channel creation arguments");
++		return NULL;
++	}
++
+ 	eh_chan = g_h.funcs->_h_calloc(sizeof(struct esp_remote_channel), 1);
+-	assert(eh_chan);
++	if (!eh_chan) {
++		ESP_LOGE(TAG, "SafeLink: remote channel allocation failed");
++		return NULL;
++	}
+ 
+ 	t_chan = transport_drv_add_channel(eh_chan, config->if_type, config->secure, tx, rx);
+ 	if (t_chan) {
+diff --git a/host/drivers/transport/sdio/sdio_drv.c b/host/drivers/transport/sdio/sdio_drv.c
+index ec2977e..90a4688 100644
+--- a/host/drivers/transport/sdio/sdio_drv.c
++++ b/host/drivers/transport/sdio/sdio_drv.c
+@@ -89,6 +89,9 @@
+ #include "port_esp_hosted_host_config.h"
+ #include "esp_hosted_event.h"
+ 
++const char safelink_stageb337_sdio_build_marker[] __attribute__((used)) = "SafeLink-StageB-337-v7-eco2:sdio_drv";
++
++
+ static const char TAG[] = "H_SDIO_DRV";
+ 
+ /* when enabled, read all required SDIO slave registers in a single
+@@ -116,7 +119,23 @@ static const char TAG[] = "H_SDIO_DRV";
+ #define MAX_WRITE_BUF_RETRIES             50
+ 
+ /* Actual data sdio_write max retry */
+-#define MAX_SDIO_WRITE_RETRY              2
++#define MAX_SDIO_WRITE_RETRY              5
++#define SAFELINK_BACKPRESSURE_MS           2
++#define SAFELINK_MIN_MEMPOOL_BT_PACKETS    3
++#define SAFELINK_MIN_MEMPOOL_SERIAL_PACKETS 3
++#define SAFELINK_MIN_MEMPOOL_NET_PACKETS   5
++#define SAFELINK_MIN_MEMPOOL_REQ           (SAFELINK_MIN_MEMPOOL_BT_PACKETS + \
++                                             SAFELINK_MIN_MEMPOOL_SERIAL_PACKETS + \
++                                             SAFELINK_MIN_MEMPOOL_NET_PACKETS)
++#define SAFELINK_POOL_MAX_BLOCKS           64
++
++#ifndef H_USE_MEMPOOL
++#error "SafeLink requires CONFIG_ESP_HOSTED_USE_MEMPOOL=y"
++#endif
++
++#if H_SDIO_HOST_RX_MODE != H_SDIO_OPTIMIZATION_RX_NONE
++#error "SafeLink requires CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y"
++#endif
+ 
+ // this locks the sdio transaction at the driver level, instead of at the HAL layer
+ #define USE_DRIVER_LOCK
+@@ -150,8 +169,27 @@ static void * sdio_bus_lock;
+ static uint8_t *reg_buf = NULL;
+ #endif
+ 
+-/* Create mempool for cache mallocs */
+-static struct mempool * buf_mp_g;
++/*
++ * SafeLink owns a bounded SDIO packet pool.  All packet blocks are carved from
++ * one contiguous DMA-aligned allocation before SDIO traffic starts; runtime
++ * traffic never grows this pool from the heap.
++ */
++typedef struct safelink_pool_node {
++    struct safelink_pool_node *next;
++} safelink_pool_node_t;
++
++typedef struct {
++    uint8_t *storage;
++    safelink_pool_node_t *free_head;
++    void *lock;
++    uint32_t block_size;
++    uint32_t num_blocks;
++    uint32_t free_blocks;
++    uint64_t allocated_bitmap;
++} safelink_sdio_pool_t;
++
++static safelink_sdio_pool_t buf_mp_g;
++static bool safelink_pool_pressure_logged;
+ 
+ extern transport_channel_t *chan_arr[ESP_MAX_IF];
+ 
+@@ -186,7 +224,7 @@ typedef struct {
+ 
+ typedef struct {
+ 	buf_info_t buffer[2];
+-	int read_index; // -1 means not in use
++	volatile int read_index; // -1 means not in use; shared by RX tasks
+ 	uint32_t read_data_len;
+ 	int write_index;
+ } double_buf_t;
+@@ -207,29 +245,144 @@ static void sdio_write_task(void const* pvParameters);
+ static void sdio_read_task(void const* pvParameters);
+ static void sdio_process_rx_task(void const* pvParameters);
+ 
+-static inline void sdio_mempool_create(void)
++static bool sdio_mempool_create(int tx_q_size, int rx_q_size)
+ {
+-	buf_mp_g = mempool_create(MAX_SDIO_BUFFER_SIZE);
+-#ifdef H_USE_MEMPOOL
+-	assert(buf_mp_g);
+-#endif
++    (void)tx_q_size;
++    const uint32_t num_blocks = (uint32_t)rx_q_size + SAFELINK_MIN_MEMPOOL_REQ;
++    const uint32_t block_size = MAX_SDIO_BUFFER_SIZE;
++    const size_t total_size = (size_t)num_blocks * block_size;
++
++    memset(&buf_mp_g, 0, sizeof(buf_mp_g));
++
++    if (!num_blocks || num_blocks > SAFELINK_POOL_MAX_BLOCKS ||
++        (block_size % HOSTED_MEM_ALIGNMENT_64) != 0) {
++        ESP_LOGE(TAG, "SafeLink: invalid fixed pool geometry blocks=%lu size=%lu",
++                 (unsigned long)num_blocks, (unsigned long)block_size);
++        return false;
++    }
++
++    buf_mp_g.lock = g_h.funcs->_h_create_lock_mempool();
++    if (!buf_mp_g.lock) {
++        ESP_LOGE(TAG, "SafeLink: failed to create packet-pool lock");
++        return false;
++    }
++
++    buf_mp_g.storage = (uint8_t *)g_h.funcs->_h_malloc_align(
++            total_size, HOSTED_MEM_ALIGNMENT_64);
++    if (!buf_mp_g.storage) {
++        ESP_LOGE(TAG, "SafeLink: failed to reserve %u x %u-byte packet pool",
++                 (unsigned)num_blocks, (unsigned)block_size);
++        g_h.funcs->_h_destroy_lock_mempool(buf_mp_g.lock);
++        memset(&buf_mp_g, 0, sizeof(buf_mp_g));
++        return false;
++    }
++
++    buf_mp_g.block_size = block_size;
++    buf_mp_g.num_blocks = num_blocks;
++    buf_mp_g.free_blocks = num_blocks;
++    g_h.funcs->_h_memset(buf_mp_g.storage, 0, total_size);
++
++    for (uint32_t i = 0; i < num_blocks; ++i) {
++        safelink_pool_node_t *node = (safelink_pool_node_t *)(
++                buf_mp_g.storage + ((size_t)i * block_size));
++        node->next = buf_mp_g.free_head;
++        buf_mp_g.free_head = node;
++    }
++
++    ESP_LOGI(TAG,
++             "SafeLink: fixed SDIO packet pool ready: %lu x %lu = %lu bytes contiguous",
++             (unsigned long)num_blocks, (unsigned long)block_size,
++             (unsigned long)total_size);
++    return true;
+ }
+ 
+ static inline void sdio_mempool_destroy(void)
+ {
+-	ESP_LOGD(TAG, "Destroying SDIO mempool");
+-	mempool_destroy(buf_mp_g);
+-	buf_mp_g = NULL;
++    if (!buf_mp_g.storage && !buf_mp_g.lock) {
++        return;
++    }
++
++    if (buf_mp_g.allocated_bitmap) {
++        ESP_LOGW(TAG, "SafeLink: destroying packet pool with outstanding blocks mask=0x%016llx",
++                 (unsigned long long)buf_mp_g.allocated_bitmap);
++    }
++
++    if (buf_mp_g.lock) {
++        g_h.funcs->_h_destroy_lock_mempool(buf_mp_g.lock);
++    }
++    if (buf_mp_g.storage) {
++        g_h.funcs->_h_free_align(buf_mp_g.storage);
++    }
++    memset(&buf_mp_g, 0, sizeof(buf_mp_g));
++    safelink_pool_pressure_logged = false;
+ }
+ 
+ static inline void *sdio_buffer_alloc(uint need_memset)
+ {
+-	return mempool_alloc(buf_mp_g, MAX_SDIO_BUFFER_SIZE, need_memset);
++    safelink_pool_node_t *node = NULL;
++    uint32_t index = 0;
++
++    if (!buf_mp_g.storage || !buf_mp_g.lock) {
++        return NULL;
++    }
++
++    g_h.funcs->_h_lock_mempool(buf_mp_g.lock);
++    node = buf_mp_g.free_head;
++    if (node) {
++        buf_mp_g.free_head = node->next;
++        index = (uint32_t)(((uint8_t *)node - buf_mp_g.storage) / buf_mp_g.block_size);
++        buf_mp_g.allocated_bitmap |= (1ULL << index);
++        if (buf_mp_g.free_blocks) {
++            --buf_mp_g.free_blocks;
++        }
++    }
++    g_h.funcs->_h_unlock_mempool(buf_mp_g.lock);
++
++    if (node && need_memset) {
++        g_h.funcs->_h_memset(node, 0, buf_mp_g.block_size);
++    }
++    return node;
+ }
+ 
+ static inline void sdio_buffer_free(void *buf)
+ {
+-	mempool_free(buf_mp_g, buf);
++    uint8_t *ptr = (uint8_t *)buf;
++    size_t offset;
++    uint32_t index;
++    uint64_t bit;
++
++    if (!ptr || !buf_mp_g.storage || !buf_mp_g.lock) {
++        return;
++    }
++
++    if (ptr < buf_mp_g.storage ||
++        ptr >= buf_mp_g.storage + ((size_t)buf_mp_g.num_blocks * buf_mp_g.block_size)) {
++        ESP_LOGE(TAG, "SafeLink: rejected foreign packet-pool free %p", buf);
++        return;
++    }
++
++    offset = (size_t)(ptr - buf_mp_g.storage);
++    if ((offset % buf_mp_g.block_size) != 0) {
++        ESP_LOGE(TAG, "SafeLink: rejected unaligned packet-pool free %p", buf);
++        return;
++    }
++
++    index = (uint32_t)(offset / buf_mp_g.block_size);
++    bit = 1ULL << index;
++
++    g_h.funcs->_h_lock_mempool(buf_mp_g.lock);
++    if (!(buf_mp_g.allocated_bitmap & bit)) {
++        g_h.funcs->_h_unlock_mempool(buf_mp_g.lock);
++        ESP_LOGE(TAG, "SafeLink: rejected duplicate packet-pool free index=%lu",
++                 (unsigned long)index);
++        return;
++    }
++
++    buf_mp_g.allocated_bitmap &= ~bit;
++    ((safelink_pool_node_t *)ptr)->next = buf_mp_g.free_head;
++    buf_mp_g.free_head = (safelink_pool_node_t *)ptr;
++    ++buf_mp_g.free_blocks;
++    g_h.funcs->_h_unlock_mempool(buf_mp_g.lock);
+ }
+ 
+ void bus_deinit_internal(void *bus_handle)
+@@ -316,19 +469,20 @@ void bus_deinit_internal(void *bus_handle)
+ 	}
+ #endif
+ 
+-	// free memory allocated in double buffering structs
++	// Streaming mode owns two individually allocated buffers.  SafeLink packet
++	// mode points these fields into the fixed packet pool, which is freed once.
++#if H_SDIO_HOST_RX_MODE == H_SDIO_HOST_STREAMING_MODE
+ 	if (double_buf.buffer[0].buf) {
+-		ESP_LOGI(TAG, "free buffer[0] %p", double_buf.buffer[0].buf);
+ 		g_h.funcs->_h_free_align(double_buf.buffer[0].buf);
+-		double_buf.buffer[0].buf = NULL;
+-		double_buf.buffer[0].buf_size = 0;
+ 	}
+ 	if (double_buf.buffer[1].buf) {
+-		ESP_LOGI(TAG, "free buffer[1] %p", double_buf.buffer[1].buf);
+ 		g_h.funcs->_h_free_align(double_buf.buffer[1].buf);
+-		double_buf.buffer[1].buf = NULL;
+-		double_buf.buffer[1].buf_size = 0;
+ 	}
++#endif
++	double_buf.buffer[0].buf = NULL;
++	double_buf.buffer[0].buf_size = 0;
++	double_buf.buffer[1].buf = NULL;
++	double_buf.buffer[1].buf_size = 0;
+ 	/* Reset double_buf state for clean reinitialization */
+ 	double_buf.read_index = -1;
+ 	double_buf.read_data_len = 0;
+@@ -488,37 +642,43 @@ static int sdio_is_write_buffer_available(uint32_t buf_needed)
+ {
+ 	static uint32_t buf_available = 0;
+ 	uint8_t retry = MAX_WRITE_BUF_RETRIES;
+-	uint32_t max_retry_sdio_not_responding = 2;
++	uint8_t unresponsive_attempts = 0;
+ 	uint32_t interval_us = 400;
+ 
+-	/*If buffer needed are less than buffer available
+-	  then only read for available buffer number from slave*/
++	/* If the slave is temporarily full, yield the SDIO lock between polls so
++	 * RX and buffer-return work can make progress.  A register that is truly
++	 * unresponsive gets the same bounded 2/5/10/20 ms SafeLink recovery window
++	 * before the existing transport-failure fallback is invoked. */
+ 	if (buf_available < buf_needed) {
+ 		while (retry) {
+-			if (sdio_get_tx_buffer_num(&buf_available, ACQUIRE_LOCK) ==
+-					ESP_HOSTED_SDIO_UNRESPONSIVE_CODE) {
+-				max_retry_sdio_not_responding--;
+-				/* restart the host to avoid the sdio locked out state */
+-
+-				if (!max_retry_sdio_not_responding) {
+-					ESP_LOGE(TAG, "%s: SDIO slave unresponsive", __func__);
++			int get_ret = sdio_get_tx_buffer_num(&buf_available, ACQUIRE_LOCK);
++			if (get_ret == ESP_HOSTED_SDIO_UNRESPONSIVE_CODE) {
++				const uint32_t backoff_ms[] = {2, 5, 10, 20};
++				++unresponsive_attempts;
++				if (unresponsive_attempts >= MAX_SDIO_WRITE_RETRY) {
++					ESP_LOGE(TAG, "SafeLink: SDIO slave unresponsive after %u attempts",
++							(unsigned)unresponsive_attempts);
+ 					g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
+ 							ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
+ 							NULL, 0, HOSTED_BLOCK_MAX);
+ #if H_TRANSPORT_RESTART_ON_FAILURE
++					ESP_LOGE(TAG, "SafeLink: invoking final P4 restart fallback");
+ 					g_h.funcs->_h_restart_host();
+ #endif
+ 					return BUFFER_UNAVAILABLE;
+ 				}
++				SDIO_DRV_UNLOCK();
++				g_h.funcs->_h_msleep(backoff_ms[unresponsive_attempts - 1]);
++				SDIO_DRV_LOCK();
+ 				continue;
+ 			}
+ 
+-			if (buf_available < buf_needed) {
+-
++			if (get_ret != ESP_OK || buf_available < buf_needed) {
+ 				ESP_LOGV(TAG, "Retry get write buffers %d", retry);
+-				retry--;
+-
++				--retry;
++				SDIO_DRV_UNLOCK();
+ 				g_h.funcs->_h_usleep(interval_us);
++				SDIO_DRV_LOCK();
+ 				if (interval_us < MAX_BUFF_FETCH_PERIODICITY) {
+ 					interval_us += 400;
+ 				}
+@@ -586,8 +746,17 @@ static void sdio_write_task(void const* pvParameters)
+ #endif
+ 
+ 		if (!buf_handle.payload_zcopy) {
+-			sendbuf = sdio_buffer_alloc(MEMSET_REQUIRED);
+-			assert(sendbuf);
++			uint32_t safelink_tx_pool_waits = 0;
++			while (!(sendbuf = sdio_buffer_alloc(MEMSET_REQUIRED))) {
++				if (safelink_tx_pool_waits++ == 0) {
++					ESP_LOGW(TAG, "SafeLink: TX packet pool full; waiting for a returned block");
++				}
++				g_h.funcs->_h_msleep(SAFELINK_BACKPRESSURE_MS);
++			}
++			if (safelink_tx_pool_waits) {
++				ESP_LOGI(TAG, "SafeLink: TX packet pool resumed after %lu waits",
++						(unsigned long)safelink_tx_pool_waits);
++			}
+ 			free_func = sdio_buffer_free;
+ 		} else {
+ 			sendbuf = buf_handle.payload;
+@@ -678,23 +847,34 @@ static void sdio_write_task(void const* pvParameters)
+ 				pos, len_to_send, ACQUIRE_LOCK);
+ #endif
+ 			if (ret) {
+-				ESP_LOGE(TAG, "%s: %d: Failed to send data: %d %ld %ld", __func__,
+-					retries, ret, len_to_send, data_left);
+-				retries++;
++				const uint32_t backoff_ms[] = {2, 5, 10, 20};
++				++retries;
++				ESP_LOGW(TAG, "SafeLink TX: attempt %u/%u failed ret=%d%s",
++						(unsigned)retries, (unsigned)MAX_SDIO_WRITE_RETRY, ret,
++						(ret == ESP_ERR_TIMEOUT) ? " (timeout)" : "");
+ 				if (retries < MAX_SDIO_WRITE_RETRY) {
+-					ESP_LOGD(TAG, "retry");
+-					continue;
+-				} else {
++					ESP_LOGW(TAG, "SafeLink TX: yielding SDIO bus for %lu ms before retry",
++							(unsigned long)backoff_ms[retries - 1]);
+ 					SDIO_DRV_UNLOCK();
+-					ESP_LOGE(TAG, "Unrecoverable host sdio state");
+-					g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
+-							ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
+-							NULL, 0, HOSTED_BLOCK_MAX);
++					g_h.funcs->_h_msleep(backoff_ms[retries - 1]);
++					SDIO_DRV_LOCK();
++					continue;
++				}
++
++				SDIO_DRV_UNLOCK();
++				ESP_LOGE(TAG, "SafeLink TX: bounded recovery exhausted");
++				g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
++						ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
++						NULL, 0, HOSTED_BLOCK_MAX);
+ #if H_TRANSPORT_RESTART_ON_FAILURE
+-					g_h.funcs->_h_restart_host();
++				ESP_LOGE(TAG, "SafeLink TX: invoking final P4 restart fallback");
++				g_h.funcs->_h_restart_host();
+ #endif
+-					goto done;
+-				}
++				goto done;
++			}
++
++			if (retries) {
++				ESP_LOGI(TAG, "SafeLink TX: recovered after %u retries", (unsigned)retries);
+ 			}
+ 
+ 			data_left -= len_to_send;
+@@ -861,13 +1041,14 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
+ 		 * 3. payload header size mismatch,
+ 		 * wrong header/bit packing?
+ 		 * */
+-		ESP_LOGW(TAG, "Dropping packet");
+-		HOSTED_FREE(buf);
++		ESP_LOGW(TAG, "Dropping invalid packet");
++		sdio_buffer_free(buf);
+ 		return ESP_FAIL;
+ 	}
+ 
+ 	if (sdio_push_pkt_to_queue(buf, len, offset)) {
+ 		ESP_LOGE(TAG, "Failed to push Rx packet to queue");
++		sdio_buffer_free(buf);
+ 		return ESP_FAIL;
+ 	}
+ 
+@@ -1033,7 +1214,10 @@ static void sdio_read_task(void const* pvParameters)
+ 	uint32_t *intr_index = NULL;
+ #endif
+ 
+-	assert(sdio_handle);
++	if (!sdio_handle) {
++		ESP_LOGE(TAG, "SafeLink: SDIO read task started without a valid handle");
++		return;
++	}
+ 
+ 	// wait for transport to be in reset state
+ 	while (true) {
+@@ -1049,8 +1233,13 @@ static void sdio_read_task(void const* pvParameters)
+ 
+ #if DO_COMBINED_REG_READ
+     if (!reg_buf) {
+-	    reg_buf = g_h.funcs->_h_malloc_align(REG_BUF_LEN, HOSTED_MEM_ALIGNMENT_64);
+-	    assert(reg_buf);
++        uint32_t waits = 0;
++        while (!(reg_buf = g_h.funcs->_h_malloc_align(REG_BUF_LEN, HOSTED_MEM_ALIGNMENT_64))) {
++            if (waits++ == 0) {
++                ESP_LOGW(TAG, "SafeLink: waiting for SDIO register buffer memory");
++            }
++            g_h.funcs->_h_msleep(SAFELINK_BACKPRESSURE_MS);
++        }
+     }
+ #endif
+ 
+@@ -1157,9 +1346,47 @@ static void sdio_read_task(void const* pvParameters)
+ 		}
+ #endif
+ 
+-		/* Allocate rx buffer */
+-		rxbuff = sdio_rx_get_buffer(len_from_slave);
+-		assert(rxbuff);
++		/* SafeLink packet mode: never consume another packet while the prior
++		 * packet is still being transferred to the RX queue. */
++		uint32_t safelink_handoff_waits = 0;
++		while (double_buf.read_index >= 0) {
++			if (safelink_handoff_waits++ == 0) {
++				ESP_LOGW(TAG, "SafeLink: RX handoff busy; applying SDIO backpressure");
++			}
++			SDIO_DRV_UNLOCK();
++			g_h.funcs->_h_msleep(SAFELINK_BACKPRESSURE_MS);
++			SDIO_DRV_LOCK();
++		}
++		if (safelink_handoff_waits) {
++			ESP_LOGI(TAG, "SafeLink: RX handoff resumed after %lu waits",
++					(unsigned long)safelink_handoff_waits);
++		}
++
++		if (len_from_slave > MAX_SDIO_BUFFER_SIZE) {
++			ESP_LOGE(TAG, "SafeLink: packet length %lu exceeds fixed buffer %u",
++					(unsigned long)len_from_slave, (unsigned)MAX_SDIO_BUFFER_SIZE);
++			SDIO_DRV_UNLOCK();
++			g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
++					ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
++					NULL, 0, HOSTED_BLOCK_MAX);
++			continue;
++		}
++
++		uint32_t safelink_pool_waits = 0;
++		while (!(rxbuff = sdio_rx_get_buffer(len_from_slave))) {
++			if (safelink_pool_waits++ == 0) {
++				ESP_LOGW(TAG, "SafeLink: RX packet pool full; applying TCP backpressure");
++				safelink_pool_pressure_logged = true;
++			}
++			SDIO_DRV_UNLOCK();
++			g_h.funcs->_h_msleep(SAFELINK_BACKPRESSURE_MS);
++			SDIO_DRV_LOCK();
++		}
++		if (safelink_pool_waits) {
++			ESP_LOGI(TAG, "SafeLink: RX resumed after %lu waits",
++					(unsigned long)safelink_pool_waits);
++			safelink_pool_pressure_logged = false;
++		}
+ 
+ 		data_left = len_from_slave;
+ 		pos = rxbuff;
+@@ -1201,18 +1428,16 @@ static void sdio_read_task(void const* pvParameters)
+ 		if (unlikely(ret))
+ 			continue;
+ 
+-		if (double_buf.read_index < 0) {
+-			double_buf.read_index = double_buf.write_index;
+-			double_buf.read_data_len = len_from_slave;
+-			double_buf.write_index = (double_buf.write_index) ? 0 : 1;
+-			// trigger task to copy data to queue
+-			g_h.funcs->_h_post_semaphore(sem_double_buf_xfer_data);
+-		} else {
+-			// error: task to copy data to queue still running
++		if (double_buf.read_index >= 0) {
++			/* Should be impossible because SafeLink waits before consuming. */
++			ESP_LOGE(TAG, "SafeLink: RX handoff invariant violated; retaining transport safety");
+ 			sdio_rx_free_buffer(rxbuff);
+-			ESP_LOGE(TAG, "task still writing Rx data to queue!");
+-			// don't send data to task, or update write_index
++			continue;
+ 		}
++		double_buf.read_index = double_buf.write_index;
++		double_buf.read_data_len = len_from_slave;
++		double_buf.write_index = (double_buf.write_index) ? 0 : 1;
++		g_h.funcs->_h_post_semaphore(sem_double_buf_xfer_data);
+ 	}
+ }
+ 
+@@ -1255,11 +1480,24 @@ static void sdio_process_rx_task(void const* pvParameters)
+ 				(buf_handle->if_type == ESP_AP_IF)) {
+ #if 1
+ 			if (chan_arr[buf_handle->if_type] && chan_arr[buf_handle->if_type]->rx) {
+-				/* TODO : Need to abstract heap_caps_malloc */
+-				uint8_t * copy_payload = (uint8_t *)g_h.funcs->_h_malloc(buf_handle->payload_len);
+-				assert(copy_payload);
+-				assert(buf_handle->payload_len);
+-				assert(buf_handle->payload);
++				uint8_t *copy_payload = NULL;
++				uint32_t safelink_copy_waits = 0;
++				if (!buf_handle->payload_len || !buf_handle->payload) {
++					ESP_LOGE(TAG, "SafeLink: invalid Wi-Fi RX payload; dropping controlled packet");
++					H_FREE_PTR_WITH_FUNC(buf_handle->free_buf_handle,
++							buf_handle->priv_buffer_handle);
++					continue;
++				}
++				while (!(copy_payload = (uint8_t *)g_h.funcs->_h_malloc(buf_handle->payload_len))) {
++					if (safelink_copy_waits++ == 0) {
++						ESP_LOGW(TAG, "SafeLink: Wi-Fi RX heap pressure; holding packet/backpressure");
++					}
++					g_h.funcs->_h_msleep(SAFELINK_BACKPRESSURE_MS);
++				}
++				if (safelink_copy_waits) {
++					ESP_LOGI(TAG, "SafeLink: Wi-Fi RX heap recovered after %lu waits",
++							(unsigned long)safelink_copy_waits);
++				}
+ 				memcpy(copy_payload, buf_handle->payload, buf_handle->payload_len);
+ 				H_FREE_PTR_WITH_FUNC(buf_handle->free_buf_handle, buf_handle->priv_buffer_handle);
+ 
+@@ -1359,15 +1597,24 @@ void *bus_init_internal(void)
+ 
+ #if defined(USE_DRIVER_LOCK)
+ 	sdio_bus_lock = g_h.funcs->_h_create_mutex();
+-	assert(sdio_bus_lock);
++	if (!sdio_bus_lock) {
++		ESP_LOGE(TAG, "SafeLink: failed to create SDIO driver lock");
++		goto init_fail;
++	}
+ #endif
+ 
+ 	sem_to_slave_queue = g_h.funcs->_h_create_semaphore(tx_queue_size * MAX_PRIORITY_QUEUES);
+-	assert(sem_to_slave_queue);
++	if (!sem_to_slave_queue) {
++		ESP_LOGE(TAG, "SafeLink: failed to create TX semaphore");
++		goto init_fail;
++	}
+ 	g_h.funcs->_h_get_semaphore(sem_to_slave_queue, 0);
+ 
+ 	sem_from_slave_queue = g_h.funcs->_h_create_semaphore(rx_queue_size * MAX_PRIORITY_QUEUES);
+-	assert(sem_from_slave_queue);
++	if (!sem_from_slave_queue) {
++		ESP_LOGE(TAG, "SafeLink: failed to create RX semaphore");
++		goto init_fail;
++	}
+ 	g_h.funcs->_h_get_semaphore(sem_from_slave_queue, 0);
+ 
+ 	/* cleanup the semaphores */
+@@ -1376,21 +1623,29 @@ void *bus_init_internal(void)
+ 	for (prio_q_idx=0; prio_q_idx<MAX_PRIORITY_QUEUES;prio_q_idx++) {
+ 		/* Queue - rx */
+ 		from_slave_queue[prio_q_idx] = g_h.funcs->_h_create_queue(rx_queue_size, sizeof(interface_buffer_handle_t));
+-		assert(from_slave_queue[prio_q_idx]);
++		if (!from_slave_queue[prio_q_idx]) {
++			ESP_LOGE(TAG, "SafeLink: failed to create RX queue %u", (unsigned)prio_q_idx);
++			goto init_fail;
++		}
+ 
+ 		/* Queue - tx */
+ 		to_slave_queue[prio_q_idx] = g_h.funcs->_h_create_queue(tx_queue_size, sizeof(interface_buffer_handle_t));
+-		assert(to_slave_queue[prio_q_idx]);
++		if (!to_slave_queue[prio_q_idx]) {
++			ESP_LOGE(TAG, "SafeLink: failed to create TX queue %u", (unsigned)prio_q_idx);
++			goto init_fail;
++		}
+ 	}
+ 
+-	sdio_mempool_create();
++	if (!sdio_mempool_create(tx_queue_size, rx_queue_size)) {
++		goto init_fail;
++	}
+ 
+ 	/* initialise SDMMC before starting read/write threads
+ 	 * which depend on SDMMC*/
+ 	sdio_handle = g_h.funcs->_h_bus_init();
+ 	if (!sdio_handle) {
+-		ESP_LOGE(TAG, "could not create sdio handle, exiting\n");
+-		assert(sdio_handle);
++		ESP_LOGE(TAG, "SafeLink: could not create SDIO handle");
++		goto init_fail;
+ 	}
+ 
+ 	// initialise double buffering structs
+@@ -1399,7 +1654,10 @@ void *bus_init_internal(void)
+ 	double_buf.write_index = 0; // we will write into the first buffer
+ 
+ 	sem_double_buf_xfer_data = g_h.funcs->_h_create_semaphore(1);
+-	assert(sem_double_buf_xfer_data);
++	if (!sem_double_buf_xfer_data) {
++		ESP_LOGE(TAG, "SafeLink: failed to create RX handoff semaphore");
++		goto init_fail;
++	}
+ 	g_h.funcs->_h_get_semaphore(sem_double_buf_xfer_data, 0);
+ 
+ 	sdio_rx_buf_thread = g_h.funcs->_h_thread_create("sdio_rx_buf",
+@@ -1414,8 +1672,20 @@ void *bus_init_internal(void)
+ 	sdio_write_thread = g_h.funcs->_h_thread_create("sdio_write",
+ 		DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_write_task, NULL);
+ 
+-	ESP_LOGD(TAG, "sdio bus init done");
++	if (!sdio_rx_buf_thread || !sdio_read_thread || !sdio_process_rx_thread || !sdio_write_thread) {
++		ESP_LOGE(TAG, "SafeLink: failed to create one or more SDIO worker tasks");
++		goto init_fail;
++	}
++
++	ESP_LOGI(TAG, "SafeLink: SDIO packet-mode transport initialized");
+ 	return sdio_handle;
++
++init_fail:
++	g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
++			ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
++			NULL, 0, HOSTED_BLOCK_MAX);
++	bus_deinit_internal(sdio_handle);
++	return NULL;
+ }
+ 
+ /**
+diff --git a/host/drivers/transport/transport_drv.c b/host/drivers/transport/transport_drv.c
+index fac29a1..8c8bb96 100644
+--- a/host/drivers/transport/transport_drv.c
++++ b/host/drivers/transport/transport_drv.c
+@@ -13,6 +13,7 @@
+ #include "esp_hosted_transport_init.h"
+ #include "esp_hosted_transport_config.h"
+ #include "esp_hosted_host_fw_ver.h"
++#include "esp_hosted_event.h"
+ #include "stats.h"
+ #include "esp_hosted_log.h"
+ #include "serial_drv.h"
+@@ -29,6 +30,9 @@
+ #include "rpc_wrap.h"
+ #include "esp_private/wifi.h"
+ 
++const char safelink_stageb337_transport_build_marker[] __attribute__((used)) = "SafeLink-StageB-337-v7-eco2:transport_drv";
++
++
+ /**
+  * @brief  Slave capabilities are parsed
+  *         Currently no added functionality to that
+@@ -100,11 +104,15 @@ void set_transport_state(uint8_t state)
+ 	transport_driver_event_handler(state);
+ }
+ 
+-static void transport_drv_init(void)
++static esp_err_t transport_drv_init(void)
+ {
+ 	bus_handle = bus_init_internal();
+ 	ESP_LOGD(TAG, "Bus handle: %p", bus_handle);
+-	assert(bus_handle);
++	if (!bus_handle) {
++		ESP_LOGE(TAG, "SafeLink: transport bus init failed; returning controlled error");
++		transport_driver_event_handler(TRANSPORT_INACTIVE);
++		return ESP_FAIL;
++	}
+ #if H_NETWORK_SPLIT_ENABLED
+ 	ESP_LOGI(TAG, "Network split enabled. Port ranges- Host:TCP(%d-%d), UDP(%d-%d), Slave:TCP(%d-%d), UDP(%d-%d)",
+ 		H_HOST_TCP_LOCAL_PORT_RANGE_START, H_HOST_TCP_LOCAL_PORT_RANGE_END,
+@@ -113,6 +121,7 @@ static void transport_drv_init(void)
+ 		H_SLAVE_UDP_REMOTE_PORT_RANGE_START, H_SLAVE_UDP_REMOTE_PORT_RANGE_END);
+ #endif
+ 	hci_drv_init();
++	return ESP_OK;
+ }
+ 
+ esp_err_t teardown_transport(void)
+@@ -140,8 +149,14 @@ esp_err_t teardown_transport(void)
+ 
+ esp_err_t setup_transport(void(*esp_hosted_up_cb)(void))
+ {
++	esp_err_t ret;
++
+ 	g_h.funcs->_h_hosted_init_hook();
+-	transport_drv_init();
++	ret = transport_drv_init();
++	if (ret != ESP_OK) {
++		transport_esp_hosted_up_cb = NULL;
++		return ret;
++	}
+ 	transport_esp_hosted_up_cb = esp_hosted_up_cb;
+ 
+ 	return ESP_OK;
+@@ -229,28 +244,48 @@ esp_err_t transport_drv_remove_channel(transport_channel_t *channel)
+ 		break;
+ 	}
+ 
+-	assert(chan_arr[channel->if_type] == channel);
++	if (channel->if_type >= ESP_MAX_IF || chan_arr[channel->if_type] != channel) {
++		ESP_LOGE(TAG, "SafeLink: refusing invalid channel removal");
++		return ESP_ERR_INVALID_STATE;
++	}
+ 
+-	mempool_destroy(channel->memp);
++	void *memp = channel->memp;
+ 	chan_arr[channel->if_type] = NULL;
++	mempool_destroy(memp);
+ 	HOSTED_FREE(channel);
+ 
+ 	return ESP_OK;
+ }
+ 
++static void transport_channel_buffer_free(esp_hosted_if_type_t if_type, void *buf)
++{
++	if (!buf) {
++		return;
++	}
++
++	if (if_type < ESP_MAX_IF && chan_arr[if_type] && chan_arr[if_type]->memp) {
++		mempool_free(chan_arr[if_type]->memp, buf);
++	} else {
++		/* Channel teardown can race an in-flight TX completion.  Buffers from
++		 * the stock 2.11.6 channel mempool originate from malloc_align(), so
++		 * direct aligned free is the safe fallback after the pool is gone. */
++		g_h.funcs->_h_free_align(buf);
++	}
++}
++
+ static void transport_sta_free_cb(void *buf)
+ {
+-	mempool_free(chan_arr[ESP_STA_IF]->memp, buf);
++	transport_channel_buffer_free(ESP_STA_IF, buf);
+ }
+ 
+ static void transport_ap_free_cb(void *buf)
+ {
+-	mempool_free(chan_arr[ESP_AP_IF]->memp, buf);
++	transport_channel_buffer_free(ESP_AP_IF, buf);
+ }
+ 
+ static void transport_serial_free_cb(void *buf)
+ {
+-	mempool_free(chan_arr[ESP_SERIAL_IF]->memp, buf);
++	transport_channel_buffer_free(ESP_SERIAL_IF, buf);
+ }
+ 
+ static esp_err_t transport_drv_sta_tx(void *h, void *buffer, size_t len)
+@@ -283,11 +318,22 @@ static esp_err_t transport_drv_sta_tx(void *h, void *buffer, size_t len)
+ #endif
+ 	}
+ 
+-	assert(h && h==chan_arr[ESP_STA_IF]->api_chan);
++	if (!h || h != chan_arr[ESP_STA_IF]->api_chan) {
++		ESP_LOGE(TAG, "SafeLink: invalid STA TX channel handle");
++		return ESP_ERR_INVALID_ARG;
++	}
+ 
+-	/*  Prepare transport buffer directly consumable */
++	/* Prepare transport buffer directly consumable.  Heap pressure is an
++	 * ordinary flow-control condition here, never a reason to abort. */
+ 	copy_buff = mempool_alloc(((struct mempool*)chan_arr[ESP_STA_IF]->memp), MAX_TRANSPORT_BUFFER_SIZE, true);
+-	assert(copy_buff);
++	if (!copy_buff) {
++		ESP_LOGW(TAG, "SafeLink: STA TX buffer unavailable; applying upper-layer backpressure");
++#if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
++		return ESP_ERR_ESP_NETIF_TX_FAILED;
++#else
++		return ESP_ERR_ESP_NETIF_NO_MEM;
++#endif
++	}
+ 	g_h.funcs->_h_memcpy(copy_buff+H_ESP_PAYLOAD_HEADER_OFFSET, buffer, len);
+ 
+ 	return esp_hosted_tx(ESP_STA_IF, 0, copy_buff, len, H_BUFF_ZEROCOPY, copy_buff, transport_sta_free_cb, 0);
+@@ -311,11 +357,22 @@ static esp_err_t transport_drv_ap_tx(void *h, void *buffer, size_t len)
+ #endif
+ 	}
+ 
+-	assert(h && h==chan_arr[ESP_AP_IF]->api_chan);
++	if (!h || h != chan_arr[ESP_AP_IF]->api_chan) {
++		ESP_LOGE(TAG, "SafeLink: invalid AP TX channel handle");
++		return ESP_ERR_INVALID_ARG;
++	}
+ 
+-	/*  Prepare transport buffer directly consumable */
++	/* Prepare transport buffer directly consumable without asserting on
++	 * temporary memory pressure. */
+ 	copy_buff = mempool_alloc(((struct mempool*)chan_arr[ESP_AP_IF]->memp), MAX_TRANSPORT_BUFFER_SIZE, true);
+-	assert(copy_buff);
++	if (!copy_buff) {
++		ESP_LOGW(TAG, "SafeLink: AP TX buffer unavailable; applying upper-layer backpressure");
++#if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
++		return ESP_ERR_ESP_NETIF_TX_FAILED;
++#else
++		return ESP_ERR_ESP_NETIF_NO_MEM;
++#endif
++	}
+ 	g_h.funcs->_h_memcpy(copy_buff+H_ESP_PAYLOAD_HEADER_OFFSET, buffer, len);
+ 
+ 	return esp_hosted_tx(ESP_AP_IF, 0, copy_buff, len, H_BUFF_ZEROCOPY, copy_buff, transport_ap_free_cb, 0);
+@@ -335,7 +392,10 @@ esp_err_t transport_drv_serial_tx(void *h, void *buffer, size_t len)
+ 		return ESP_ERR_ESP_NETIF_NO_MEM;
+ #endif
+ 	}
+-	assert(h && h==chan_arr[ESP_SERIAL_IF]->api_chan);
++	if (!h || h != chan_arr[ESP_SERIAL_IF]->api_chan) {
++		ESP_LOGE(TAG, "SafeLink: invalid serial TX channel handle");
++		return ESP_ERR_INVALID_ARG;
++	}
+ 	return esp_hosted_tx(ESP_SERIAL_IF, 0, buffer, len, H_BUFF_NO_ZEROCOPY, buffer, transport_serial_free_cb, 0);
+ }
+ 
+@@ -347,7 +407,10 @@ transport_channel_t *transport_drv_add_channel(void *api_chan,
+ 	ESP_LOGD(TAG, "Adding channel IF[%u]: S[%u] Tx[%p] Rx[%p]", if_type, secure, tx, rx);
+ 	transport_channel_t *channel = NULL;
+ 
+-	ESP_ERROR_CHECK(if_type >= ESP_MAX_IF);
++	if (if_type >= ESP_MAX_IF) {
++		ESP_LOGE(TAG, "SafeLink: invalid channel interface %u", if_type);
++		return NULL;
++	}
+ 
+ 	if (!tx || !rx) {
+ 		ESP_LOGE(TAG, "%s fail for IF[%u]: tx or rx is NULL", __func__, if_type );
+@@ -366,7 +429,10 @@ transport_channel_t *transport_drv_add_channel(void *api_chan,
+ 
+ 
+ 	chan_arr[if_type] = g_h.funcs->_h_calloc(sizeof(transport_channel_t), 1);
+-	assert(chan_arr[if_type]);
++	if (!chan_arr[if_type]) {
++		ESP_LOGE(TAG, "SafeLink: channel allocation failed for IF[%u]", if_type);
++		return NULL;
++	}
+ 	channel = chan_arr[if_type];
+ 
+ 	switch (if_type) {
+@@ -386,6 +452,8 @@ transport_channel_t *transport_drv_add_channel(void *api_chan,
+ 	default:
+ 		//*tx = transport_drv_tx;
+ 		ESP_LOGW(TAG, "Not yet supported ESP_Hosted interface for if_type[%u]", if_type);
++		HOSTED_FREE(chan_arr[if_type]);
++		chan_arr[if_type] = NULL;
+ 		return NULL;
+ 	}
+ 
+@@ -398,7 +466,12 @@ transport_channel_t *transport_drv_add_channel(void *api_chan,
+ 	/* Need to change size wrt transport */
+ 	channel->memp = mempool_create(MAX_TRANSPORT_BUFFER_SIZE);
+ #ifdef H_USE_MEMPOOL
+-	assert(channel->memp);
++	if (!channel->memp) {
++		ESP_LOGE(TAG, "SafeLink: channel mempool creation failed for IF[%u]", if_type);
++		HOSTED_FREE(chan_arr[if_type]);
++		chan_arr[if_type] = NULL;
++		return NULL;
++	}
+ #endif
+ 
+ 	ESP_LOGD(TAG, "Add ESP-Hosted channel IF[%u]: S[%u] Tx[%p] Rx[%p]",
+@@ -636,7 +709,10 @@ esp_err_t send_slave_config(uint8_t host_cap, uint8_t firmware_chip_id,
+ 	uint8_t *sendbuf = NULL;
+ 
+ 	sendbuf = g_h.funcs->_h_malloc_align(MEMPOOL_ALIGNED(256), MEMPOOL_ALIGNMENT_BYTES);
+-	assert(sendbuf);
++	if (!sendbuf) {
++		ESP_LOGE(TAG, "SafeLink: slave-config buffer allocation failed");
++		return ESP_ERR_NO_MEM;
++	}
+ 
+ 	/* Populate event data */
+ 	//event = (struct esp_priv_event *) (sendbuf + sizeof(struct esp_payload_header)); //ZeroCopy
+@@ -823,9 +899,17 @@ static int process_init_event(uint8_t *evt_buf, uint16_t len)
+ 
+ 	transport_driver_event_handler(TRANSPORT_TX_ACTIVE);
+ 
+-	ESP_ERROR_CHECK(send_slave_config(0, chip_type, raw_tp_config,
++	esp_err_t config_ret = send_slave_config(0, chip_type, raw_tp_config,
+ 		H_WIFI_TX_DATA_THROTTLE_LOW_THRESHOLD,
+-		H_WIFI_TX_DATA_THROTTLE_HIGH_THRESHOLD));
++		H_WIFI_TX_DATA_THROTTLE_HIGH_THRESHOLD);
++	if (config_ret != ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: slave configuration send failed without abort: %s",
++			esp_err_to_name(config_ret));
++		transport_driver_event_handler(TRANSPORT_RX_ACTIVE);
++		g_h.funcs->_h_event_post(ESP_HOSTED_EVENT,
++			ESP_HOSTED_EVENT_TRANSPORT_FAILURE, NULL, 0, HOSTED_BLOCK_MAX);
++		return config_ret;
++	}
+ 
+ 	transport_delayed_init();
+ 
+diff --git a/host/port/esp/freertos/src/port_esp_hosted_host_sdio.c b/host/port/esp/freertos/src/port_esp_hosted_host_sdio.c
+index f072c1d..550305f 100644
+--- a/host/port/esp/freertos/src/port_esp_hosted_host_sdio.c
++++ b/host/port/esp/freertos/src/port_esp_hosted_host_sdio.c
+@@ -22,6 +22,9 @@
+ #include "hal/sdmmc_ll.h"
+ 
+ #include "esp_log.h"
++
++const char safelink_stageb337_sdmmc_build_marker[] __attribute__((used)) = "SafeLink-StageB-337-v7-eco2:sdmmc_slot";
++
+ DEFINE_LOG_TAG(sdio_wrapper);
+ 
+ #define CIS_BUFFER_SIZE 256
+@@ -97,7 +100,10 @@ static esp_err_t hosted_sdio_print_cis_information(sdmmc_card_t* card)
+ 	if (ret == ESP_ERR_INVALID_SIZE) {
+ 		int temp_buf_size = cis_data_len;
+ 		uint8_t* temp_buf = g_h.funcs->_h_malloc(temp_buf_size);
+-		assert(temp_buf);
++		if (!temp_buf) {
++			ESP_LOGE(TAG, "SafeLink: CIS temporary buffer allocation failed");
++			return ESP_ERR_NO_MEM;
++		}
+ 
+ 		ESP_LOGW(TAG, "CIS data longer than expected, temporary buffer allocated.");
+ 		ret = sdmmc_io_get_cis_data(card, temp_buf, temp_buf_size, &cis_data_len);
+@@ -303,7 +309,14 @@ int hosted_sdio_deinit(void* ctx)
+ 		sdio_bus_lock = NULL;
+ 	}
+ 
+-	sdmmc_host_deinit();
++	esp_err_t res = sdmmc_host_deinit_slot(context->config.slot);
++	if (res != ESP_OK) {
++		ESP_LOGE(TAG, "SafeLink: failed to deinit SDMMC slot %d: %s",
++				context->config.slot, esp_err_to_name(res));
++		return res;
++	}
++	ESP_LOGI(TAG, "SafeLink: released SDMMC slot %d without deinitializing other slots",
++			context->config.slot);
+ 
+ 	return ESP_OK;
+ }
+@@ -381,13 +394,19 @@ void * hosted_sdio_init(void)
+ 	// initialise connected SDIO card/slave
+ 	context.card = (sdmmc_card_t *)g_h.funcs->_h_malloc(sizeof(sdmmc_card_t));
+ 	if (!context.card) {
+-		ESP_LOGE(TAG, "Failed to allocate memory for SDMMC card");
++		ESP_LOGE(TAG, "SafeLink: failed to allocate memory for SDMMC card");
++		sdmmc_host_deinit_slot(context.config.slot);
+ 		return NULL;
+ 	}
+ 
+ 	// initialise mutex for bus locking
+ 	sdio_bus_lock = g_h.funcs->_h_create_mutex();
+-	assert(sdio_bus_lock);
++	if (!sdio_bus_lock) {
++		ESP_LOGE(TAG, "SafeLink: failed to allocate SDIO bus mutex");
++		HOSTED_FREE(context.card);
++		sdmmc_host_deinit_slot(context.config.slot);
++		return NULL;
++	}
+ 
+ 	return (void *)&context;
+ }
