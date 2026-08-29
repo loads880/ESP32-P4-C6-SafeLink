@@ -1,3 +1,0 @@
-611cf50d4fabb72212fc850299385a495a993beb2981de07a8eb581aa6d3f054  patches/p4/safelink-p4-esp-hosted-2.11.6.patch
-bc69824b641da41df44d7379de152832e63bfdd5fb8304ee823a91ee6624e4bb  config/safelink-esp32p4.fragment
-23e1e0cbf51acaa1bf59ed643e3fdecb8cdab1c78abd8cf56cf92d25f1f872af  config/safelink-esp32c6.fragment
