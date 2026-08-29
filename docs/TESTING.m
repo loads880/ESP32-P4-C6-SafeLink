@@ -1,112 +1,177 @@
 # SafeLink Testing and Validation
 
-SafeLink v0.1 has been validated through build-time checks, configuration checks, binary inspection, physical hardware testing, and integration testing.
+SafeLink v0.1 has been validated through stock-baseline comparison, build-time checks, configuration checks, binary inspection, physical hardware testing, SDIO runtime testing, and application integration.
 
-The purpose of this document is to record the validation scope of the initial SafeLink release.
+This document records the validation scope of the initial SafeLink release.
 
-## Validation Target
+# Validation Target
 
-The validated hardware and software combination is:
+| Component                | Validated configuration   |
+| ------------------------ | ------------------------- |
+| Host processor           | ESP32-P4                  |
+| Host silicon             | ECO2 / prev3              |
+| Communications processor | ESP32-C6                  |
+| Arduino-ESP32            | 3.3.7                     |
+| P4 ESP-Hosted host       | 2.11.6                    |
+| P4 SafeLink source patch | Applied                   |
+| C6 ESP-Hosted slave      | 2.12.9                    |
+| C6 ESP-Hosted source     | Stock 2.12.9 source       |
+| C6 SafeLink requirement  | Packet-mode configuration |
+| Transport                | 4-bit SDIO                |
+| ESP-Hosted mode          | Packet mode               |
+| P4 SDIO RX optimisation  | Disabled                  |
 
-| Component                | Validated configuration                  |
-| ------------------------ | ---------------------------------------- |
-| Host processor           | ESP32-P4                                 |
-| Host silicon             | ECO2 / prev3                             |
-| Communications processor | ESP32-C6                                 |
-| Arduino-ESP32            | 3.3.7                                    |
-| P4 ESP-Hosted host       | 2.11.6                                   |
-| C6 ESP-Hosted slave      | 2.12.9 with SafeLink packet-mode changes |
-| Transport                | 4-bit SDIO                               |
-| ESP-Hosted mode          | Packet mode                              |
-| SDIO RX optimisation     | Disabled                                 |
+# SafeLink Architecture Under Test
 
-## Validation Stages
+```text id="r54ogt"
+ESP32-P4 ECO2 / prev3
+    ESP-Hosted host 2.11.6
+    + SafeLink source patch
+    + SafeLink P4 configuration
+              |
+              | 4-bit SDIO
+              | packet mode
+              |
+ESP32-C6
+    ESP-Hosted slave 2.12.9
+    stock source
+    + packet-mode configuration
+```
 
-SafeLink was developed and validated in several stages.
+Only the ESP32-P4 requires SafeLink source-code modifications.
 
-### Stage A — Stock Baseline Control
+The ESP32-C6 uses stock ESP-Hosted 2.12.9 source configured for packet-mode SDIO operation.
 
-Before adding SafeLink, the ESP32-P4 Arduino-ESP32 3.3.7 build environment was reproduced and checked against the stock ESP32-P4 ECO2 libraries.
+# Stage A — Stock Baseline Control
 
-The purpose of this stage was to prove that the build environment could reproduce the expected stock baseline before any SafeLink modifications were introduced.
+Before adding SafeLink, the Arduino-ESP32 3.3.7 ESP32-P4 build environment was reproduced and compared with the official ESP32-P4 ECO2 library package.
+
+The purpose of Stage A was to establish a trustworthy control before introducing any SafeLink source changes.
+
+Checks included:
+
+* Arduino-ESP32 3.3.7 provenance
+* ESP32-P4 ECO2 / prev3 target
+* ESP-IDF baseline
+* ESP-Hosted host version
+* generated ESP32-P4 library structure
+* generated configuration
+* comparison with the official ECO2 package
 
 Result:
 
-```text
+```text id="99sbg1"
 PASS
 ```
 
-The ECO2 / prev3 target was used for the final validated baseline.
+# Stage B — SafeLink P4 Build Validation
 
-## Stage B — SafeLink Build Validation
+SafeLink source changes were applied to ESP-Hosted host 2.11.6.
 
-SafeLink modifications were then introduced into the ESP32-P4 host-side ESP-Hosted transport path.
-
-The Stage B checks included:
+The Stage B validation checked:
 
 * correct ESP32-P4 ECO2 / prev3 target
 * correct Arduino-ESP32 3.3.7 baseline
-* correct ESP-Hosted host component selection
-* verification that the patched source files were actually compiled
-* verification of required SafeLink configuration invariants
-* binary inspection for SafeLink implementation markers
-* comparison against the stock ECO2 baseline
-
-The validated SafeLink Stage B build passed these checks.
+* ESP-Hosted host 2.11.6
+* correct local SafeLink component selection
+* required SafeLink configuration invariants
+* compilation of all intended SafeLink source files
+* binary presence of implementation markers
+* comparison with the stock ECO2 baseline
 
 Result:
 
-```text
+```text id="kvhgps"
 PASS
 ```
 
-## Configuration Validation
+# P4 Source Selection Verification
 
-The validated configuration was checked for the SafeLink transport requirements.
+An important part of Stage B was confirming that the build system actually compiled the SafeLink-modified ESP-Hosted source.
 
-Required conditions included:
+ESP-IDF component precedence can otherwise allow an unmodified managed component to be selected even when a patched copy exists elsewhere.
 
-```text
+The validated build confirmed that all four SafeLink-modified host source files were selected.
+
+The four P4 files are:
+
+```text id="o9fwt1"
+host/api/src/esp_hosted_api.c
+
+host/drivers/transport/sdio/sdio_drv.c
+
+host/drivers/transport/transport_drv.c
+
+host/port/esp/freertos/src/port_esp_hosted_host_sdio.c
+```
+
+Result:
+
+```text id="oj8d7p"
+PASS
+```
+
+# Configuration Validation
+
+The validated P4 configuration required:
+
+```text id="shfl4o"
 ESP-Hosted packet mode              REQUIRED
 
 4-bit SDIO                          REQUIRED
 
 SDIO RX optimisation                DISABLED
 
+ESP-Hosted mempool                  ENABLED
+
 Fixed SafeLink receive pool         REQUIRED
 
 Bounded host receive capacity       REQUIRED
 ```
 
-The validated build satisfied these requirements.
+The C6 configuration required:
+
+```text id="fphj4g"
+ESP-Hosted slave 2.12.9             REQUIRED
+
+Stock ESP-Hosted source             REQUIRED
+
+SDIO transport                      REQUIRED
+
+4-bit SDIO                          REQUIRED
+
+SDIO streaming mode                 DISABLED
+
+Packet-mode operation               REQUIRED
+```
 
 Result:
 
-```text
+```text id="0nmc3w"
 PASS
 ```
 
-## Source Integration Verification
+# Binary Verification
 
-The build process verified that the intended SafeLink-modified ESP-Hosted source files were selected by the build system rather than an unmodified managed-component copy.
+The SafeLink build process did not rely only on compiler success.
 
-This check was important because component-selection precedence can otherwise cause a build to succeed while silently compiling the stock ESP-Hosted implementation.
+Non-log implementation markers were included so the generated ESP32-P4 library could be inspected to prove that the intended SafeLink source paths were actually present in the resulting binary.
 
-The final validated binary contained implementation markers originating from the SafeLink-patched source files.
+Markers from all four modified host source files were verified.
 
 Result:
 
-```text
+```text id="xm1lhq"
 PASS
 ```
 
-## Stage C — Physical Hardware Validation
+# Stage C — Physical Hardware Validation
 
-Stage C moved SafeLink from build verification to execution on physical hardware.
+Stage C moved SafeLink from build verification to physical execution.
 
-The validated target was:
+The tested hardware relationship was:
 
-```text
+```text id="9n96pc"
 ESP32-P4 ECO2 / prev3
         |
         | 4-bit SDIO
@@ -114,36 +179,144 @@ ESP32-P4 ECO2 / prev3
 ESP32-C6
 ```
 
-The SafeLink-enabled host libraries were exercised on the real ESP32-P4 hardware while communicating with the ESP32-C6 communications processor.
+The SafeLink-enabled ESP32-P4 host libraries were exercised against the ESP32-C6 communications processor.
 
-Stage C completed successfully.
+The C6 was running ESP-Hosted 2.12.9 using the packet-mode configuration required by SafeLink.
 
 Result:
 
-```text
+```text id="6uypyd"
 PASS
 ```
 
-## Runtime Integration Validation
+# Runtime Packet-Mode Verification
 
-Following Stage C hardware validation, SafeLink was integrated into a working ESP32-P4 networked application.
+Runtime logs confirmed that both processors agreed on packet mode.
+
+The observed transport state was:
+
+```text id="ai4z0e"
+slave: packet
+host:  packet
+```
+
+This is an important SafeLink invariant.
+
+A host/slave transport-mode mismatch is not considered a valid SafeLink configuration.
+
+Result:
+
+```text id="wn7sag"
+PASS
+```
+
+# ESP32-C6 Version Verification
+
+During runtime testing, the communications processor identified itself as:
+
+```text id="jxptpw"
+ESP32-C6
+ESP-Hosted 2.12.9
+```
+
+The tested C6 firmware used stock ESP-Hosted source with the required packet-mode configuration.
+
+SafeLink v0.1 does not contain a C6 source patch.
+
+# Network Runtime Testing
+
+SafeLink was exercised with real network activity through the ESP32-C6.
+
+Testing included operations such as:
+
+* ESP-Hosted initialization
+* C6 detection
+* Wi-Fi initialization
+* access-point scanning
+* network connection
+* sustained network transfers
+* repeated packet processing
+* recovery-oriented tests
+
+The P4/C6 SDIO transport remained operational through the validated test sequence.
+
+Result:
+
+```text id="1xeqdx"
+PASS
+```
+
+# Receive-Pool Behaviour
+
+The defining SafeLink host behaviour is bounded packet reception.
+
+The intended receive flow is:
+
+```text id="8kb38m"
+free SafeLink buffer available
+            |
+            v
+consume SDIO packet
+            |
+            v
+pass packet upward
+            |
+            v
+buffer eventually returned
+```
+
+When the fixed pool has no available capacity:
+
+```text id="zd12uj"
+no free SafeLink buffer
+            |
+            v
+stop consuming additional SDIO packet
+            |
+            v
+allow transport back-pressure
+            |
+            v
+wait for buffer capacity
+            |
+            v
+resume
+```
+
+This behaviour prevents the SafeLink receive path from relying on unbounded host-side buffering.
+
+# Recovery Behaviour
+
+The P4 source patch also introduces bounded recovery behaviour around SDIO operations.
+
+The purpose is to provide controlled retry and recovery before resorting to the existing transport-failure fallback.
+
+SafeLink does not claim that transport failure can never occur.
+
+It provides a bounded and deliberate response to conditions that would otherwise lead directly to unrecoverable host SDIO failure.
+
+# Application Integration Validation
+
+After the standalone SafeLink transport and hardware tests passed, the validated SafeLink libraries were integrated into a complete ESP32-P4 networked application.
 
 The application itself is private and is not included in this repository.
 
-The integration test confirmed that the SafeLink-enabled ESP-Hosted transport could operate as part of the complete application build rather than only as an isolated library build.
+The integration test demonstrated that the SafeLink-enabled ESP-Hosted transport could operate inside a real application build rather than only in isolated transport tests.
 
 Result:
 
-```text
+```text id="j4pjf0"
 PASS
 ```
 
-## Overall Validation Status
+# Overall Validation Status
 
-```text
+```text id="wge0sj"
 Stock ECO2 baseline reproduction       PASS
 
-SafeLink source selection              PASS
+P4 SafeLink source patch               PASS
+
+P4 source-selection verification       PASS
 
 SafeLink configuration checks          PASS
 
@@ -151,51 +324,62 @@ SafeLink binary verification           PASS
 
 ESP32-P4 ECO2 hardware execution       PASS
 
+C6 ESP-Hosted 2.12.9 runtime           PASS
+
+Host/slave packet-mode agreement       PASS
+
 P4 <-> C6 SDIO runtime operation       PASS
+
+Network runtime testing                PASS
 
 Application integration                PASS
 ```
 
-## Scope of the Validation Claim
+# Scope of the Validation Claim
 
-The SafeLink v0.1 validation claim applies only to the documented configuration.
+SafeLink v0.1 validation applies only to the documented configuration.
 
 It does not imply validation of:
 
 * other Arduino-ESP32 releases
-* other ESP-Hosted host releases
-* other ESP-Hosted slave releases
+* P4 ESP-Hosted versions other than 2.11.6
+* C6 ESP-Hosted versions other than 2.12.9
 * different ESP32-P4 silicon revisions
-* alternative transport modes
-* SDIO RX optimisation enabled
-* automatically ported patches to future source trees
+* alternative ESP-Hosted transport modes
+* P4 SDIO RX optimisation enabled
+* automatic rebases of the SafeLink source patch
+* arbitrary host/slave version combinations
 
-A configuration outside the documented baseline should be considered a new port and tested independently.
+Any configuration outside the documented baseline should be considered a new SafeLink port.
 
-## Reproducibility
+# Reproducibility
 
-The SafeLink repository is intended to provide enough information for another developer to:
+The repository is intended to provide enough information for another developer to:
 
 1. obtain the documented upstream source versions
-2. apply the SafeLink patches
-3. build the ESP32-P4 host components
-4. build or install the corresponding ESP32-C6 firmware
-5. verify the required SafeLink configuration
-6. test the resulting system on physical hardware
+2. reproduce the Arduino-ESP32 3.3.7 ESP32-P4 ECO2 baseline
+3. apply the SafeLink P4 source patch
+4. apply the P4 reference configuration
+5. configure stock ESP-Hosted 2.12.9 on the C6 for packet mode
+6. build both sides
+7. confirm host/slave packet-mode agreement
+8. test the resulting system on physical hardware
 
-The source patches, rather than the private application used during development, are the authoritative implementation of SafeLink published by this repository.
+The private application used during integration testing is not required to reproduce SafeLink.
 
-## Future Testing
+# Future Testing
 
-Future SafeLink versions may add:
+Future SafeLink work may include:
 
-* longer-duration stress testing
-* packet-burst testing
+* longer-duration endurance tests
+* heavier packet-burst testing
+* deliberate receive-pool exhaustion
 * deliberate host-processing stalls
-* pool-exhaustion testing
 * recovery timing measurements
 * throughput measurements
-* validation against newer ESP-Hosted releases
-* validation on additional ESP32-P4 revisions
+* newer ESP-Hosted host ports
+* newer ESP-Hosted slave validation
+* additional ESP32-P4 silicon revisions
+* additional P4/C6 board designs
 
-Results from future configurations should be documented separately so that the SafeLink v0.1 validation baseline remains unchanged.
+Each newly validated combination should be documented separately so that the SafeLink v0.1 baseline remains reproducible.
