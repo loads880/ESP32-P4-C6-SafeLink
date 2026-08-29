@@ -1,151 +1,149 @@
-# SafeLink Supported Versions
+# ESP32-P4-C6 SafeLink
 
-SafeLink v0.1 is deliberately tied to the software and hardware configuration on which it was developed and validated.
+SafeLink is a reliability modification for ESP32-P4 to ESP32-C6 networking using ESP-Hosted over SDIO.
 
-The purpose of this version lock is reliability and reproducibility.
+The project provides only the source patch, configuration fragments, and documentation required to reproduce the SafeLink transport changes.
 
-SafeLink should not be assumed to work correctly with later or earlier versions of Arduino-ESP32, ESP-IDF, ESP-Hosted, or different ESP32-P4 silicon revisions without additional testing.
+The private application in which SafeLink was originally integrated and validated is not included.
 
-# Validated Configuration
+## Purpose
 
-| Component                          | Validated version / configuration |
-| ---------------------------------- | --------------------------------- |
-| Host processor                     | ESP32-P4                          |
-| Host silicon                       | ECO2 / prev3                      |
-| Communications processor           | ESP32-C6                          |
-| Arduino-ESP32                      | 3.3.7                             |
-| ESP-IDF baseline                   | release/v5.5                      |
-| ESP-IDF commit                     | `87912cd291`                      |
-| ESP32 Arduino lib-builder baseline | `8cabf2c`                         |
-| P4 ESP-Hosted host component       | 2.11.6                            |
-| `esp_wifi_remote`                  | 1.3.2                             |
-| C6 ESP-Hosted slave firmware       | 2.12.9                            |
-| Transport                          | 4-bit SDIO                        |
-| ESP-Hosted operating mode          | Packet mode                       |
-| SDIO RX optimisation               | Disabled                          |
-| SafeLink host buffering            | Fixed preallocated packet pool    |
+SafeLink is intended to improve reliability when an ESP32-P4 host communicates with an ESP32-C6 communications coprocessor using ESP-Hosted over SDIO.
 
-# P4 Host Baseline
+The SafeLink host receive path uses bounded, preallocated packet buffering.
 
-The SafeLink v0.1 P4 host patch is based on the ESP-Hosted host component supplied by the Arduino-ESP32 3.3.7 ESP32-P4 build environment.
+When no receive capacity remains available, the ESP32-P4 stops consuming additional SDIO packet data and allows the ESP-Hosted transport relationship with the ESP32-C6 to provide back-pressure.
 
-The validated host component is:
+## Architecture
+
+SafeLink v0.1 uses:
 
 ```text
-esp_hosted 2.11.6
+ESP32-P4
+    ESP-Hosted host 2.11.6
+    + SafeLink source patch
+    + SafeLink P4 configuration
+              |
+              | 4-bit SDIO
+              | packet mode
+              |
+ESP32-C6
+    ESP-Hosted slave 2.12.9
+    + packet-mode configuration
+    + no SafeLink source-code patch
 ```
 
-The Arduino-ESP32 baseline is:
+The SafeLink source modifications are on the ESP32-P4 host.
+
+The ESP32-C6 side uses ESP-Hosted 2.12.9 with the configuration required for packet-mode operation.
+
+## Design Principles
+
+SafeLink v0.1 uses the following transport policy:
+
+* ESP-Hosted packet mode
+* 4-bit SDIO transport
+* SDIO RX optimisation disabled on the P4
+* Fixed preallocated P4 receive packet pool
+* No unbounded receive-buffer growth
+* Stop consuming SDIO packets when P4 receive capacity is exhausted
+* Resume packet consumption when receive capacity becomes available
+* Bounded SDIO recovery and retry behaviour
+
+## Supported Configuration
+
+SafeLink v0.1 is deliberately version-locked to the configuration on which it was developed and validated.
+
+### ESP32-P4 Host
+
+* ESP32-P4 ECO2 / prev3
+* Arduino-ESP32 3.3.7
+* ESP-Hosted host component 2.11.6
+* SafeLink P4 source patch
+* 4-bit SDIO
+* Packet mode
+* SDIO RX optimisation disabled
+
+### ESP32-C6 Coprocessor
+
+* ESP32-C6
+* ESP-Hosted slave firmware 2.12.9
+* Stock ESP-Hosted source
+* Packet-mode configuration
+* 4-bit SDIO
+
+Other Arduino-ESP32, ESP-IDF, ESP-Hosted, or ESP32-P4 silicon versions have not yet been validated and are not currently supported.
+
+Do not apply the P4 patch blindly to later ESP-Hosted releases.
+
+## Repository Contents
+
+### `patches/p4/`
+
+Contains the SafeLink host-side source patch for ESP-Hosted 2.11.6.
+
+The current validated patch is:
 
 ```text
-Arduino-ESP32 3.3.7
+safelink-p4-esp-hosted-2.11.6.patch
 ```
 
-The ESP-IDF baseline associated with the validated Arduino build is:
+### `config/`
+
+Contains the validated reference configuration fragments:
 
 ```text
-ESP-IDF release/v5.5
-commit 87912cd291
+safelink-esp32p4.fragment
+safelink-esp32c6.fragment
 ```
 
-The corresponding ESP32 Arduino library-builder provenance is:
+The P4 fragment defines the SafeLink host transport requirements.
 
-```text
-esp32-arduino-lib-builder
-commit 8cabf2c
-```
+The C6 fragment records the packet-mode configuration used with ESP-Hosted slave 2.12.9.
 
-The validated remote Wi-Fi component is:
+### `docs/`
 
-```text
-esp_wifi_remote 1.3.2
-```
+Contains supported-version information, architecture documentation, build instructions, and testing notes.
 
-# C6 Slave Baseline
+## Validation
 
-The validated ESP32-C6 communications processor uses:
+SafeLink has completed:
 
-```text
-ESP-Hosted slave firmware 2.12.9
-```
+* stock baseline reproduction
+* build-time validation
+* configuration validation
+* patched-source selection verification
+* binary verification
+* ESP32-P4 ECO2 physical hardware testing
+* ESP32-P4 to ESP32-C6 SDIO runtime testing
+* integration testing inside a working ESP32-P4 networked application
 
-with the SafeLink packet-mode changes required by this implementation.
+The application used for integration testing is private and is not required to use SafeLink.
 
-The C6 side should therefore not be assumed to be an untouched stock ESP-Hosted 2.12.9 firmware image.
-The SafeLink C6 changes will be provided separately from the P4 host changes so that the modifications on each processor can be reviewed independently.
-note: when flashing the c6 you may want to park the p4 so it does not try to recover and reset the c6 
+## Important C6 Note
 
-# ESP32-P4 Hardware
+SafeLink v0.1 does not modify the ESP32-C6 ESP-Hosted source code.
 
-SafeLink v0.1 has been hardware validated on:
+The validated C6 side uses ESP-Hosted 2.12.9 configured for packet-mode SDIO operation.
 
-```text
-ESP32-P4 ECO2
-Arduino chip variant: prev3
-```
+Therefore there is no `patches/c6/` source patch in this repository.
 
-Other ESP32-P4 revisions have not been validated as part of the SafeLink v0.1 release.
+## Project Status
 
-# SDIO Configuration
+SafeLink v0.1 represents the first hardware-validated implementation.
 
-The validated SafeLink transport configuration is:
+The goal of this repository is to make that known-good implementation reproducible and reviewable rather than to claim compatibility with every ESP-Hosted release.
 
-```text
-ESP32-P4 host
-       |
-       |  4-bit SDIO
-       |
-ESP32-C6 communications processor
-```
+Future ports can be added as separately validated versions.
 
-SafeLink v0.1 requires ESP-Hosted packet-mode operation.
-SDIO RX optimisation is disabled in the validated configuration.
-The SafeLink host receive path uses a fixed preallocated packet-buffer pool.
-When the pool is exhausted, the P4 host stops consuming additional SDIO packets until receive capacity becomes available again. This allows transport back-pressure to occur rather than continuing host-side packet consumption beyond the available SafeLink buffer capacity.
+## License
 
-# Unsupported Configurations
+SafeLink modifications are intended to be released under the Apache License 2.0.
 
-SafeLink v0.1 does not currently claim support for:
+Existing Espressif copyright and SPDX notices must be preserved where applicable.
 
-```text
-Arduino-ESP32 versions other than 3.3.7
-P4 ESP-Hosted host versions other than 2.11.6
-C6 ESP-Hosted slave versions other than 2.12.9
-ESP32-P4 silicon revisions other than the validated ECO2 / prev3 target
-Alternative ESP-Hosted transport modes
-SDIO RX optimisation enabled
-```
+## Disclaimer
 
-These configurations may work after suitable porting, but they have not been validated by this project.
+SafeLink is an independent reliability modification and is not an official Espressif project.
 
-# Version Porting
-
-Developers are welcome to port SafeLink to newer ESP-Hosted or Arduino-ESP32 releases.
-
-A port should not be described as a validated SafeLink configuration until the relevant SafeLink invariants and runtime behaviour have been tested on physical hardware.
-
-Future validated combinations can be documented separately so that the original v0.1 baseline remains reproducible.
-
-# SafeLink v0.1 Compatibility Policy
-
-The SafeLink v0.1 patches should be treated as version-specific source modifications rather than generic patches intended to apply automatically to arbitrary ESP-Hosted releases.
-
-If a patch does not apply cleanly to another version, do not force it.
-
-Instead, the SafeLink behaviour should be ported deliberately to the newer implementation and tested again.
-
-# Validation Status
-
-The configuration documented above has completed:
-
-```text
-Build validation                 PASS
-Configuration validation         PASS
-SafeLink binary verification     PASS
-ESP32-P4 ECO2 hardware test      PASS
-P4 <-> C6 SDIO runtime test      PASS
-Application integration test     PASS
-```
-
-The application used for integration testing is private and is not part of the SafeLink repository.
-The SafeLink repository contains only the transport modifications, supporting documentation, and material required to reproduce or review SafeLink itself.
+ESP32, ESP-IDF, and ESP-Hosted are technologies and projects developed by Espressif Systems.
