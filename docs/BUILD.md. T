@@ -1,0 +1,350 @@
+# Building SafeLink
+
+This document describes the reference build configuration for SafeLink v0.1.
+
+SafeLink v0.1 is deliberately version-locked. The objective is to reproduce the configuration that has already passed build verification and physical ESP32-P4 / ESP32-C6 hardware testing.
+
+Do not substitute newer versions while attempting the initial reproduction.
+
+# Reference Configuration
+
+## ESP32-P4 Host
+
+```text
+Processor:              ESP32-P4
+Silicon:                ECO2 / prev3
+Arduino-ESP32:          3.3.7
+ESP-Hosted host:        2.11.6
+esp_wifi_remote:        1.3.2
+Transport:              4-bit SDIO
+ESP-Hosted mode:        Packet mode
+SDIO RX optimisation:   Disabled
+```
+
+## ESP32-C6 Communications Processor
+
+```text
+Processor:              ESP32-C6
+ESP-Hosted slave:       2.12.9
+SafeLink C6 changes:    Required
+Transport:              4-bit SDIO
+```
+
+# Important Version Note
+
+The validated SafeLink v0.1 configuration intentionally uses:
+
+```text
+P4 host:   ESP-Hosted 2.11.6
+C6 slave:  ESP-Hosted 2.12.9 with SafeLink changes
+```
+
+This is the configuration that was physically tested.
+
+It should not be interpreted as a general recommendation to mix arbitrary ESP-Hosted host and slave versions.
+
+The SafeLink C6 modifications and the tested packet-mode configuration form part of this specific compatibility relationship.
+
+# Build Philosophy
+
+SafeLink should be reproduced from a known stock baseline.
+
+The recommended process is:
+
+```text
+Known stock source
+        |
+        v
+Verify exact versions
+        |
+        v
+Apply SafeLink patches
+        |
+        v
+Verify configuration
+        |
+        v
+Build
+        |
+        v
+Verify generated libraries
+        |
+        v
+Install into separate Arduino environment
+        |
+        v
+Test on physical hardware
+```
+
+Do not modify the only working Arduino installation on a development computer.
+
+A separate build or test installation is strongly recommended.
+
+# 1. Obtain Arduino-ESP32 3.3.7
+
+Install or obtain the official Arduino-ESP32 3.3.7 package.
+
+SafeLink v0.1 was built against the ESP32-P4 ECO2 library configuration associated with this release.
+
+The target board configuration must resolve to:
+
+```text
+ESP32-P4
+Chip variant: prev3
+```
+
+for the validated ECO2 target.
+
+Do not use libraries generated for a later ESP32-P4 silicon target in place of the ECO2 / prev3 libraries.
+
+# 2. Confirm the Baseline
+
+Before applying SafeLink, confirm the important component versions.
+
+The expected SafeLink v0.1 P4 baseline is:
+
+```text
+Arduino-ESP32                 3.3.7
+
+esp32-arduino-lib-builder     commit 8cabf2c
+
+ESP-IDF release/v5.5          commit 87912cd291
+
+esp_wifi_remote               1.3.2
+
+esp_hosted                    2.11.6
+```
+
+These values record the exact source provenance used by the validated SafeLink build.
+
+If the source tree does not correspond to this baseline, stop and determine why before applying the patch.
+
+# 3. Preserve a Stock Control
+
+Before modifying ESP-Hosted, build or retain a stock copy of the ESP32-P4 ECO2 libraries.
+
+The stock build provides a control against which the SafeLink build can be compared.
+
+The reference SafeLink development process first established that the stock build environment reproduced the expected Arduino-ESP32 3.3.7 ECO2 library set.
+
+Only after that control passed were the SafeLink modifications introduced.
+
+This is recommended when reproducing SafeLink.
+
+# 4. Apply the P4 SafeLink Patch
+
+The P4 host modifications will be supplied in:
+
+```text
+patches/p4/safelink-p4-esp-hosted-2.11.6.patch
+```
+
+Apply this patch only to the documented ESP-Hosted 2.11.6 host source baseline.
+
+The patch changes the P4 ESP-Hosted transport receive path to implement the SafeLink packet-buffer and back-pressure policy.
+
+A normal Git patch workflow may use:
+
+```bash
+git apply --check safelink-p4-esp-hosted-2.11.6.patch
+```
+
+before making any changes.
+
+If the check succeeds:
+
+```bash
+git apply safelink-p4-esp-hosted-2.11.6.patch
+```
+
+If `git apply --check` fails, do not force the patch.
+
+A failure usually means the source version is different from the baseline expected by SafeLink.
+
+# 5. Verify SafeLink Configuration
+
+Before compiling, verify the SafeLink invariants.
+
+The resulting configuration must provide:
+
+```text
+ESP-Hosted packet mode              ENABLED
+
+SDIO transport                      ENABLED
+
+4-bit SDIO                          CONFIGURED
+
+SDIO RX optimisation                DISABLED
+
+SafeLink fixed packet pool          ENABLED
+
+Bounded packet capacity             ENABLED
+```
+
+The exact configuration symbols may depend on the ESP-Hosted source location and build environment.
+
+The behavioural requirements are more important than blindly copying a configuration file.
+
+# 6. Ensure the Patched Component Is Actually Selected
+
+This is an important build check.
+
+ESP-IDF component precedence can result in an unmodified managed component being selected instead of a locally patched copy.
+
+A successful compilation therefore does not, by itself, prove that SafeLink was included.
+
+The build should confirm that the SafeLink-modified ESP-Hosted source files are the files selected by CMake.
+
+The validated SafeLink build explicitly checked source selection before accepting the resulting libraries.
+
+# 7. Build the ESP32-P4 Libraries
+
+Build the ESP32-P4 libraries using the Arduino-ESP32 3.3.7 library-builder environment and the ECO2 / prev3 configuration.
+
+The resulting library set should correspond to the normal Arduino ESP32-P4 ECO2 library package, except for differences intentionally introduced by the SafeLink transport policy.
+
+SafeLink should not require unrelated modifications to the Arduino core or the user's application.
+
+# 8. Verify the Result
+
+Do not treat a successful compiler exit as sufficient validation.
+
+At minimum, verify:
+
+```text
+Correct target                          ESP32-P4 ECO2 / prev3
+
+Correct Arduino baseline                3.3.7
+
+Correct ESP-Hosted host                 2.11.6
+
+Packet mode                             Correct
+
+SDIO RX optimisation                    Disabled
+
+SafeLink patched source selection       Confirmed
+
+SafeLink implementation in binaries     Confirmed
+```
+
+The original SafeLink build process included binary implementation markers specifically so that accidental compilation of the stock ESP-Hosted source could be detected.
+
+# 9. Install the SafeLink P4 Libraries
+
+Install the resulting ESP32-P4 ECO2 library set into a separate Arduino-ESP32 3.3.7 test environment.
+
+Keeping the SafeLink installation separate from the stock installation makes it easy to:
+
+* compare behaviour
+* return to the stock configuration
+* isolate build problems
+* avoid accidentally mixing libraries from different targets or versions
+
+Do not mix SafeLink-generated libraries with libraries from another Arduino-ESP32 release.
+
+# 10. Prepare the ESP32-C6 Firmware
+
+SafeLink v0.1 also requires the corresponding C6-side configuration.
+
+The C6 baseline is:
+
+```text
+ESP32-C6
+ESP-Hosted slave 2.12.9
+SafeLink packet-mode changes applied
+```
+
+The C6 patch will be provided separately as:
+
+```text
+patches/c6/safelink-c6-esp-hosted-2.12.9.patch
+```
+
+This separation allows the host-side and slave-side modifications to be reviewed independently.
+
+Do not assume that an untouched stock ESP-Hosted 2.12.9 C6 firmware image is equivalent to the SafeLink-tested C6 firmware.
+
+# 11. Apply the C6 Patch
+
+Against the correct ESP-Hosted 2.12.9 slave source:
+
+```bash
+git apply --check safelink-c6-esp-hosted-2.12.9.patch
+```
+
+If the check succeeds:
+
+```bash
+git apply safelink-c6-esp-hosted-2.12.9.patch
+```
+
+If the check fails, verify the ESP-Hosted source version rather than forcing the patch.
+
+# 12. Build and Flash the C6
+
+Build the patched ESP32-C6 ESP-Hosted slave firmware using the configuration supplied with the SafeLink v0.1 patch set.
+
+Flash the resulting slave firmware to the ESP32-C6 using the normal ESP-Hosted / ESP-IDF flashing procedure appropriate to the target hardware.
+
+Preserve a copy of the original working C6 firmware before replacing it.
+
+# 13. First Hardware Test
+
+After both sides are prepared:
+
+```text
+SafeLink ESP32-P4 host
+          |
+          | 4-bit SDIO
+          |
+SafeLink ESP32-C6 slave
+```
+
+perform a basic communication test before integrating SafeLink into a large application.
+
+Confirm:
+
+* C6 startup
+* SDIO initialization
+* P4/C6 communication
+* Wi-Fi initialization
+* network scan
+* connection to an access point
+* network traffic
+* continued SDIO operation
+
+# 14. Application Integration
+
+SafeLink is below the application networking layer.
+
+An application should not need to contain SafeLink-specific networking logic merely to benefit from the modified ESP-Hosted transport.
+
+The application used for the original SafeLink validation is private and is not required to reproduce SafeLink.
+
+SafeLink should therefore be tested first at the transport/network level and then inside the developer's own application.
+
+# Reference Build Principle
+
+The initial reproduction should always follow:
+
+```text
+Arduino-ESP32 3.3.7
+        +
+P4 ESP-Hosted 2.11.6
+        +
+SafeLink P4 patch
+        +
+ESP32-P4 ECO2 / prev3
+        |
+        | 4-bit SDIO
+        |
+ESP32-C6
+        +
+ESP-Hosted slave 2.12.9
+        +
+SafeLink C6 patch
+```
+
+Once this known configuration has been reproduced, developers may investigate ports to newer releases.
+
+A newer-version port should be considered a separate implementation until its SafeLink invariants and runtime behaviour have been independently verified on physical hardware.
