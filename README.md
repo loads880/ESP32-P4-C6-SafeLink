@@ -60,6 +60,12 @@ The application used for validation is not part of this repository.
 
 ## Repository contents
 
+Tests/
+this folder contains some details of the testing that has been used 
+the actual test files are not part of this release but 3 tests are shown as examples here to illustrate the integrity of safelink.
+multiple downloads of 50gb files were soak tested over many hours and  disrupted and partial files with safelink recovery were
+tested  using safelink including downloading to the SD card without disrupting the host.  I have added the serial logs of each test.
+
 `patches/p4/`
 Contains the SafeLink host-side changes for the ESP32-P4 ESP-Hosted transport.
 
