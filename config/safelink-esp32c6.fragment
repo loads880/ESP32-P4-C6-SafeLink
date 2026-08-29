@@ -1,0 +1,30 @@
+# SafeLink ESP32-C6 reference configuration for ESP-Hosted slave 2.12.9.
+#
+# SafeLink does not patch C6 source code in the validated v0.1 design.
+# The required C6-side behavioural change is packet mode: disable the
+# ESP-Hosted SDIO streaming-mode setting.
+#
+# Reference hardware/build settings below record the validated C6 side.
+
+CONFIG_IDF_TARGET="esp32c6"
+CONFIG_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_COPROCESSOR=y
+CONFIG_ESP_HOSTED_CP_WIFI=y
+CONFIG_ESP_SDIO_HOST_INTERFACE=y
+# CONFIG_ESP_SDIO_STREAMING_MODE is not set
+# CONFIG_ESP_SDIO_DEFAULT_SPEED is not set
+CONFIG_ESP_SDIO_HIGH_SPEED=y
+CONFIG_ESP_SDIO_PIN_CMD=18
+CONFIG_ESP_SDIO_PIN_CLK=19
+CONFIG_ESP_SDIO_PIN_D0=20
+CONFIG_ESP_SDIO_PIN_D1=21
+CONFIG_ESP_SDIO_PIN_D2=22
+CONFIG_ESP_SDIO_PIN_D3=23
+CONFIG_ESP_SDIO_PSEND_PSAMPLE=y
+# CONFIG_ESP_SDIO_NSEND_PSAMPLE is not set
+# CONFIG_ESP_SDIO_PSEND_NSAMPLE is not set
+# CONFIG_ESP_SDIO_NSEND_NSAMPLE is not set
+CONFIG_ESP_SDIO_TX_Q_SIZE=20
+CONFIG_ESP_SDIO_RX_Q_SIZE=20
+# CONFIG_ESP_SDIO_CHECKSUM is not set
+CONFIG_ESP_HOSTED_USE_MEMPOOL=y
