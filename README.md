@@ -71,7 +71,7 @@ tested  using safelink including downloading to the SD card without disrupting t
 Contains the SafeLink host-side changes for the ESP32-P4 ESP-Hosted transport.
 
 `patches/c6/`
-Contains the corresponding ESP32-C6 slave-side changes required by the validated SafeLink configuration.
+There are no patches for the C6 only a single configuration  change to select packet mode The C6 is stock 11.2.9
 
 `docs/`
 Contains the supported-version matrix, design description, build instructions and validation notes.
